@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  api:
+    image: 192.168.100.43:5000/chatbot.gov.api:0.0.1
+    command: python main_api.py
+    ports:
+      - "8070:8080"
+    env_file: .env
+    restart: unless-stopped
+    networks:
+      - chatbot-gov
+
+  crawler:
+    image: 192.168.100.43:5000/chatbot.gov.api:0.0.1
+    command: python scheduler.py
+    env_file: .env
+    restart: unless-stopped
+    networks:
+      - chatbot-gov
+
+networks:
+  chatbot-gov:
+    driver: bridge
+    name: chatbot-gov
+    ipam:
+      config:
+        - subnet: "173.21.0.0/16"
