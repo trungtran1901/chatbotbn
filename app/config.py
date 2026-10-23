@@ -27,7 +27,8 @@ class Settings(BaseSettings):
     postgres_db: str = "rag"
     postgres_user: str = "postgres"
     postgres_password: str = "postgres"
-
+    mem0_service_url: str = "http://mem0:8090"
+    mem0_search_limit: int = 5
     ocr_pdf_url: str = ""
     ocr_pdf_bbox_format: str = "xyxy"
     ocr_img_url: str = ""

@@ -5,14 +5,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
-from app.rag.retrieval import retrieve_blocks, render_blocks, merge_blocks
+from app.rag.retrieval import retrieve_blocks, render_blocks
 from app.rag.direct_stream import stream_chat_completion, chat_completion
-from app.db.postgres import (
-    save_chat_message,
-    load_chat_history,
-    save_retrieval_cache,
-    load_retrieval_cache,
-)
+from app.rag.mem0_client import add_turn, search_memories
 from app.crawler.pipeline import run_crawl
 
 app = FastAPI(title="Agno RAG Service")
@@ -45,39 +40,30 @@ def build_user_message(chatinput: str, context: str) -> str:
     return f"NGUỒN DỮ LIỆU:\n{context}\n\nCÂU HỎI:\n{chatinput}"
 
 
-def build_retrieval_query(session_id: str, current_question: str, lookback: int = 2) -> str:
+def build_retrieval_query(session_id: str, current_question: str) -> str:
     try:
-        history = load_chat_history(session_id, limit=lookback * 2)
+        memories = search_memories(session_id, current_question)
     except Exception:
-        logger.exception("Loi doc lich su hoi thoai de mo rong truy van")
+        logger.exception("Loi tim memory de mo rong truy van")
         return current_question
 
-    recent_user_turns = [h["content"] for h in history if h["role"] == "user"]
-    recent_user_turns = recent_user_turns[-lookback:]
+    memory_texts = [m.get("memory") or m.get("text") or "" for m in memories]
+    memory_texts = [t for t in memory_texts if t]
 
-    if not recent_user_turns:
+    if not memory_texts:
         return current_question
 
-    return " ".join(recent_user_turns + [current_question])
+    return " ".join(memory_texts[:3] + [current_question])
 
 
 def get_context_for_turn(session_id: str, chatinput: str):
     retrieval_query = build_retrieval_query(session_id, chatinput)
-    new_blocks = retrieve_blocks(retrieval_query)
+    blocks = retrieve_blocks(retrieval_query, top_n=MAX_CONTEXT_BLOCKS)
 
-    try:
-        cached_blocks = load_retrieval_cache(session_id)
-    except Exception:
-        logger.exception("Loi doc retrieval cache")
-        cached_blocks = []
+    if not blocks:
+        return None
 
-    merged = merge_blocks(new_blocks, cached_blocks, max_total=MAX_CONTEXT_BLOCKS)
-
-    if not merged:
-        return None, []
-
-    rendered = render_blocks(merged)
-    return rendered, merged
+    return render_blocks(blocks)
 
 
 def verify_grounding(answer: str, allowed_links: set) -> bool:
@@ -93,27 +79,19 @@ def verify_grounding(answer: str, allowed_links: set) -> bool:
 
 @app.post("/chat/sync")
 def chat_sync(req: ChatRequest):
-    retrieval, merged_blocks = get_context_for_turn(req.sessionId, req.chatinput)
+    retrieval = get_context_for_turn(req.sessionId, req.chatinput)
 
     if not retrieval:
-        save_chat_message(req.sessionId, "user", req.chatinput)
-        save_chat_message(req.sessionId, "assistant", NOT_FOUND_ANSWER)
+        add_turn(req.sessionId, req.chatinput, NOT_FOUND_ANSWER)
         return JSONResponse({"answer": NOT_FOUND_ANSWER})
 
     message = build_user_message(req.chatinput, retrieval["context_text"])
-    answer = chat_completion(req.sessionId, message)
+    answer = chat_completion(req.sessionId, message, req.chatinput)
 
     if not verify_grounding(answer, retrieval["allowed_links"]):
         answer = NOT_FOUND_ANSWER
 
-    save_chat_message(req.sessionId, "user", req.chatinput)
-    save_chat_message(req.sessionId, "assistant", answer)
-
-    if answer != NOT_FOUND_ANSWER:
-        try:
-            save_retrieval_cache(req.sessionId, merged_blocks)
-        except Exception:
-            logger.exception("Loi luu retrieval cache")
+    add_turn(req.sessionId, req.chatinput, answer)
 
     return JSONResponse({"answer": answer})
 
@@ -142,12 +120,11 @@ def sse_format(data: str, event: str = None) -> str:
 
 @app.post("/chat/stream")
 def chat_stream(req: ChatRequest):
-    retrieval, merged_blocks = get_context_for_turn(req.sessionId, req.chatinput)
+    retrieval = get_context_for_turn(req.sessionId, req.chatinput)
 
     if not retrieval:
         def empty_stream():
-            save_chat_message(req.sessionId, "user", req.chatinput)
-            save_chat_message(req.sessionId, "assistant", NOT_FOUND_ANSWER)
+            add_turn(req.sessionId, req.chatinput, NOT_FOUND_ANSWER)
             yield sse_format(json.dumps({"content": NOT_FOUND_ANSWER}, ensure_ascii=False))
             yield sse_format("[DONE]", event="done")
         return StreamingResponse(
@@ -173,10 +150,7 @@ def chat_stream(req: ChatRequest):
             yield sse_format(json.dumps({"error": "Da xay ra loi khi sinh cau tra loi"}, ensure_ascii=False), event="error")
         finally:
             if full_answer_holder["text"]:
-                try:
-                    save_retrieval_cache(req.sessionId, merged_blocks)
-                except Exception:
-                    logger.exception("Loi luu retrieval cache")
+                add_turn(req.sessionId, req.chatinput, full_answer_holder["text"])
             yield sse_format("[DONE]", event="done")
 
     return StreamingResponse(

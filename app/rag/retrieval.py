@@ -3,7 +3,7 @@ import logging
 from typing import List, Optional, Dict
 from app.embeddings import embedder
 from app.qdrant_store import store
-# from app.reranker import reranker
+from app.reranker import reranker
 from app.keyword_extractor import extract_keywords
 
 logger = logging.getLogger("rag.retrieval")
@@ -57,12 +57,12 @@ def retrieve_blocks(query: str, limit: int = 40, top_n: int = 8) -> List[Dict]:
         return []
 
     # RERANK TAM THOI DISABLE - truyen thang docs khong qua rerank
-    # documents = [h.payload.get("content", "") for h in hits]
-    # try:
-    #     ranked = reranker.rerank(query, documents, top_n=top_n)
-    # except Exception:
-    #     logger.exception("Loi goi reranker cho cau hoi: %s", query)
-    #     ranked = []
+    documents = [h.payload.get("content", "") for h in hits]
+    try:
+        ranked = reranker.rerank(query, documents, top_n=top_n)
+    except Exception:
+        logger.exception("Loi goi reranker cho cau hoi: %s", query)
+        ranked = []
     ranked = []
 
     if ranked:
